@@ -238,6 +238,25 @@
       font-weight: 700;
     }
 
+    .click-hint {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      padding: 8px 12px;
+      margin-bottom: 14px;
+      border-radius: 7px;
+      background: linear-gradient(135deg, rgba(25, 167, 206, 0.12), rgba(255, 209, 102, 0.12));
+      border: 1px dashed rgba(25, 167, 206, 0.35);
+      color: var(--muted);
+      font-size: 12px;
+      text-align: center;
+    }
+
+    .click-hint span {
+      font-weight: 500;
+    }
+
     .score-grid {
       display: grid;
       grid-template-columns: 1.15fr 0.85fr;
@@ -859,6 +878,10 @@
         <button data-mode="morning">朝霞</button>
       </div>
 
+      <div class="click-hint" id="clickHint">
+        <span>📍 点击地图任意位置，查看该位置的火烧云指数</span>
+      </div>
+
       <div id="dateStrip" class="date-strip" aria-label="未来 7 天"></div>
 
       <div class="score-grid">
@@ -1279,6 +1302,15 @@
         map.on("click", "radar-points", (event) => {
           const feature = findFeatureByCoordinates(event.features[0].geometry.coordinates) || event.features[0];
           selectFeature(feature);
+        });
+
+        // 添加任意位置点击选点功能
+        map.on("click", (event) => {
+          // 如果点击的是已有的采样点，不处理（由上面的监听器处理）
+          if (event.features && event.features.length > 0) return;
+          
+          const { lng, lat } = event.lngLat;
+          selectCustomLocation(lng, lat);
         });
 
         if (state.features.length) updateMap();
@@ -1816,8 +1848,75 @@
         ? findFeatureByCoordinates(feature.geometry.coordinates)
         : findFeatureByBase(feature.properties);
       state.selected = fullFeature?.properties || feature.properties;
+      state.customLocation = null;
       document.body.classList.add("has-mobile-selection");
       updatePanel();
+    }
+
+    // 自定义位置选点功能
+    let customMarker = null;
+    async function selectCustomLocation(lng, lat) {
+      if (!map) return;
+      
+      // 移除旧的自定义标记
+      if (customMarker) {
+        customMarker.remove();
+        customMarker = null;
+      }
+      
+      // 清除选择状态
+      state.selected = null;
+      document.body.classList.add("has-mobile-selection");
+      
+      // 显示加载中状态
+      setStatus("正在计算自定义位置...");
+      setLoading(true);
+      
+      try {
+        // 获取该位置的天气数据
+        const [gcjLon, gcjLat] = wgs84ToGcj02(lng, lat);
+        const point = { lon: gcjLon, lat: gcjLat, distance: 0, bearing: 0, isCenter: false };
+        const analysisPoints = makeAnalysisPoints([point], state.mode, state.dayOffset);
+        const weather = await fetchForecast(analysisPoints);
+        const weatherByBase = groupWeatherByBase(analysisPoints, weather);
+        
+        // 计算火烧云指数
+        const evaluated = evaluatePoint(weatherByBase[0].base, point, state.mode, state.slot, weatherByBase[0].rays);
+        
+        if (!evaluated) {
+          setStatus("无法计算该位置数据");
+          setLoading(false);
+          return;
+        }
+        
+        // 设置选择状态
+        evaluated.baseLon = gcjLon;
+        evaluated.baseLat = gcjLat;
+        evaluated.isCustom = true;
+        state.selected = evaluated;
+        state.customLocation = { lng: gcjLon, lat: gcjLat };
+        
+        // 添加自定义标记
+        const markerEl = document.createElement("div");
+        markerEl.className = "radar-marker hot";
+        markerEl.style.background = colorForScore(evaluated.score);
+        markerEl.style.border = "3px solid white";
+        markerEl.style.boxShadow = "0 0 15px rgba(239, 71, 111, 0.6)";
+        markerEl.title = `自定义位置：${Math.round(evaluated.score)} 分`;
+        
+        customMarker = new maplibregl.Marker({ element: markerEl, anchor: "center" })
+          .setLngLat([gcjLon, gcjLat])
+          .addTo(map);
+        
+        // 更新面板
+        updatePanel();
+        setStatus(`自定义位置：${gcjLat.toFixed(4)}°N, ${gcjLon.toFixed(4)}°E`);
+      } catch (error) {
+        console.error("Custom location error:", error);
+        setStatus("自定义位置计算失败");
+      } finally {
+        setLoading(false);
+      }
     }
 
     function focusMapOn(center, options = {}) {
